@@ -37,7 +37,7 @@ publishing {
             from(components["java"])
             groupId = "net.weavemc"
             artifactId = "mappings-util"
-            version = "1.0.0"
+            version = project.version as String
         }
     }
 }
