@@ -22,19 +22,22 @@ dependencies {
 }
 
 publishing {
-    publications {
-        create<MavenPublication>("lib") { from(components["java"]) }
-    }
-
     repositories {
         maven {
-            name = "Packages"
-            url = uri("https://maven.pkg.github.com/770grappenmaker/mappings-util")
-
-            credentials {
-                username = System.getenv("GITHUB_ACTOR")
-                password = System.getenv("GITHUB_TOKEN")
+            name = "WeaveMC"
+            url = uri("https://repo.weavemc.dev/releases")
+            credentials(PasswordCredentials::class)
+            authentication {
+                create<BasicAuthentication>("basic")
             }
+        }
+    }
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+            groupId = "net.weavemc"
+            artifactId = "mappings-util"
+            version = "1.0.0"
         }
     }
 }
