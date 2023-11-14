@@ -52,7 +52,7 @@ public class LambdaAwareRemapper(parent: ClassVisitor, remapper: Remapper) : Cla
 /**
  * A [MethodRemapper] that is aware of the remapping of Invoke Dynamic instructions for lambdas.
  */
-public class LambdaAwareMethodRemapper(
+public open class LambdaAwareMethodRemapper(
     private val parent: MethodVisitor,
     remapper: Remapper
 ) : MethodRemapper(Opcodes.ASM9, parent, remapper) {
