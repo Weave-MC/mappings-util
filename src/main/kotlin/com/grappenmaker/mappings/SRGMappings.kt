@@ -23,12 +23,12 @@ public fun SRGMappings.asSimpleRemapper(): SimpleRemapper = asSimpleRemapper(nam
 public fun SRGMappings.write(): List<String> = (if (isExtended) XSRGMappingsFormat else SRGMappingsFormat).write(this)
 
 /**
- * Represents the XSRG mappings format
+ * Represents the SRG mappings format
  */
 public data object SRGMappingsFormat : MappingsFormat<SRGMappings> by BasicSRGParser(false)
 
 /**
- * Represents the SRG mappings format
+ * Represents the XSRG mappings format
  */
 public data object XSRGMappingsFormat : MappingsFormat<SRGMappings> by BasicSRGParser(true)
 
@@ -48,7 +48,7 @@ internal class BasicSRGParser(private val isExtended: Boolean) : MappingsFormat<
             MappedField(
                 names = listOf(from.substringAfterLast('/'), to.substringAfterLast('/')),
                 comments = listOf(),
-                desc = if (isExtended) parts[1] else null
+                desc = if (isExtended) parts[1] else "null" //TODO probably shouldn't set desc to "null" if it's missing
             )
         }
 
