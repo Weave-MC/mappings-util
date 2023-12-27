@@ -1,4 +1,5 @@
 plugins {
+    kotlin("plugin.serialization")
     kotlin("jvm")
     id("org.jetbrains.dokka")
     `maven-publish`
@@ -9,16 +10,16 @@ repositories {
 }
 
 group = "com.grappenmaker"
-version = "0.1"
+version = "0.2.0"
 
 kotlin {
     jvmToolchain(8)
-    explicitApi()
 }
 
 dependencies {
     api("org.ow2.asm:asm:9.4")
     api("org.ow2.asm:asm-commons:9.4")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.5.1")
 }
 
 publishing {
@@ -35,7 +36,7 @@ publishing {
     publications {
         create<MavenPublication>("maven") {
             from(components["java"])
-            groupId = "net.weavemc"
+            groupId = "com.grappenmaker"
             artifactId = "mappings-util"
             version = project.version as String
         }
