@@ -1,5 +1,6 @@
 package com.grappenmaker.mappings
 
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
 import java.net.URL
@@ -16,32 +17,28 @@ import kotlin.io.path.inputStream
 import kotlin.io.path.writeLines
 
 fun main() {
-    minecraftMappingsStream("1.20")
+    mcpMappingsStream("1.15.1")
 }
 
 private const val forgeMavenRoot = "https://maven.minecraftforge.net/de/oceanlabs/mcp"
-// older versions
-private const val mcpSnapshot = "$forgeMavenRoot/mcp_snapshot/maven-metadata.xml"
-// newer versions
-private const val mcpConfig = "$forgeMavenRoot/mcp_config/maven-metadata.xml"
 
 data class MCPVersion(
-    val gameVersion: String,
+    val version: String,
     val snapshot: String,
-    val namespace: String
+    val channel: String
 )
 
 fun MCPVersion.downloadNames(to: Path) =
     DownloadUtil.download(
-        URL("$forgeMavenRoot/mcp_$namespace/$snapshot-$gameVersion/mcp_$namespace-$snapshot-$gameVersion.zip"),
+        URL("$forgeMavenRoot/mcp_snapshot/$snapshot-$version/mcp_snapshot-$snapshot-$version.zip"),
         to
     )
 
 fun MCPVersion.downloadMappings(to: Path) {
-    val url = if (namespace == "stable")
-        URL("$forgeMavenRoot/mcp/$gameVersion/mcp-$gameVersion-srg.zip")
+    val url = if (channel == "stable")
+        URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip")
     else
-        URL("$forgeMavenRoot/mcp_$namespace/$gameVersion/mcp_$namespace-$gameVersion.zip")
+        URL("$forgeMavenRoot/mcp_$channel/$version/mcp_$channel-$version.zip")
 
     DownloadUtil.download(url, to)
 }
@@ -77,47 +74,40 @@ fun Mappings.mergeSRGWithMCP(methods: List<String>, fields: List<String>): Gener
     )
 }
 
-fun minecraftMappingsStream(version: String): InputStream {
+fun mcpMappingsStream(version: String): InputStream {
     val versionInt = version.substringAfter("1.").toDouble()
-    val isNew = versionInt >= 12.2
+    val joinedMappings = if (versionInt >= 13) "config/joined.tsrg" else "joined.srg"
+    val mappingsChannel = if (versionInt >= 15.1) "config" else "snapshot"
 
-    println(isNew)
+    if (versionInt >= 16)
+        error("Versions 1.16+ do not have MCP mappings associated")
 
-    val url = if (isNew) mcpConfig else mcpSnapshot
+    val url = "$forgeMavenRoot/mcp_$mappingsChannel/maven-metadata.xml"
     val mcVersion = ForgeXMLParser.parseVersions(url)[version]
         ?: error("Could not find version $version in $url")
 
     val snapshot = mcVersion.snapshot
 
-    val cachePath = Path("${System.getProperty("user.home")}/.weave/.cache/mappings/snapshot_$snapshot")
-    val namesCache = cachePath.resolve("mcp-$snapshot-${version}-names.zip")
-    val mappingsCache = cachePath.resolve("mcp-$snapshot-${version}-mappings.zip")
-    val mergedMappingsCached = cachePath.resolve("mcp-$snapshot-${version}-merged.tiny")
+    val cachePath = Path("${System.getProperty("user.home")}/.weave/.cache/mappings/mcp_$version")
+    val namesCache = cachePath.resolve("names.zip")
+    val mappingsCache = cachePath.resolve("mappings.zip")
+    val mergedMappingsCached = cachePath.resolve("merged.tiny")
 
     if (!mergedMappingsCached.exists()) {
         mcVersion.apply {
-            if (!namesCache.exists() && !isNew) downloadNames(namesCache)
+            if (!namesCache.exists()) downloadNames(namesCache)
             if (!mappingsCache.exists()) downloadMappings(mappingsCache)
         }
 
         val mappingsContent = readFullZip(ZipFile(mappingsCache.toFile()))
+        val namesContent = readFullZip(ZipFile(namesCache.toFile()))
+        val joinedContent = mappingsContent.getValue(joinedMappings)
 
-        val mappings =
-            if (isNew) mappingsContent.getValue("config/joined.tsrg")
-            else mappingsContent.getValue("joined.srg")
-
-        val originalMappings = MappingsLoader.loadMappings(mappings.decodeToString().nonBlankLines())
-
-        val finalMappings = if (isNew)
-            originalMappings
-        else {
-            val namesContent = readFullZip(ZipFile(namesCache.toFile()))
-
-            originalMappings.mergeSRGWithMCP(
-                methods = namesContent.getValue("methods.csv").decodeToString().nonBlankLines(),
-                fields = namesContent.getValue("fields.csv").decodeToString().nonBlankLines(),
-            )
-        }
+        val originalMappings = MappingsLoader.loadMappings(joinedContent.decodeToString().nonBlankLines())
+        val finalMappings = originalMappings.mergeSRGWithMCP(
+            methods = namesContent.getValue("methods.csv").decodeToString().nonBlankLines(),
+            fields = namesContent.getValue("fields.csv").decodeToString().nonBlankLines(),
+        )
 
         mergedMappingsCached.writeLines(finalMappings.asTinyMappings(v2 = true).write())
     }
@@ -146,12 +136,12 @@ object ForgeXMLParser {
             if (url.contains("snapshot"))
                 MCPVersion(after, before, "snapshot")
             else
-                MCPVersion(before, after, "config")
+                MCPVersion(before, after.substringBefore('.'), "config")
         }
 
-        return versions.groupBy { it.gameVersion }
+        return versions.groupBy { it.version }
             .mapValues { it.value.maxByOrNull { version -> version.snapshot }!! }.values.toList()
-            .associateBy { version -> version.gameVersion }
+            .associateBy { version -> version.version }
     }
 }
 
@@ -191,6 +181,7 @@ object DownloadUtil {
      * @param path The path to download to.
      */
     fun download(url: URL, path: Path) {
+        println(url)
         runCatching {
             url.openStream().use { input ->
                 Files.createDirectories(path.parent)
