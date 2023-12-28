@@ -1,23 +1,16 @@
 package com.grappenmaker.mappings
 
-import java.io.FileNotFoundException
-import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.URL
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
-import java.security.NoSuchAlgorithmException
-import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import kotlin.io.path.Path
 import kotlin.io.path.exists
 import kotlin.io.path.inputStream
 import kotlin.io.path.writeLines
 
 fun main() {
-    mcpMappingsStream("1.15.1")
+    mcpMappingsStream("1.8.9")
 }
 
 private const val forgeMavenRoot = "https://maven.minecraftforge.net/de/oceanlabs/mcp"
@@ -28,19 +21,14 @@ data class MCPVersion(
     val channel: String
 )
 
-fun MCPVersion.downloadNames(to: Path) =
-    DownloadUtil.download(
-        URL("$forgeMavenRoot/mcp_snapshot/$snapshot-$version/mcp_snapshot-$snapshot-$version.zip"),
-        to
-    )
-
-fun MCPVersion.downloadMappings(to: Path) {
-    val url = if (channel == "stable")
-        URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip")
+fun MCPVersion.mcpMappingsStream(): ZipInputStream = ZipInputStream(
+    URL("$forgeMavenRoot/mcp_snapshot/$snapshot-$version/mcp_snapshot-$snapshot-$version.zip").openStream()
+)
+fun MCPVersion.srgMappingsStream(useNew: Boolean): ZipInputStream {
+    return if (useNew)
+        ZipInputStream(URL("$forgeMavenRoot/mcp_$channel/$version/mcp_$channel-$version.zip").openStream())
     else
-        URL("$forgeMavenRoot/mcp_$channel/$version/mcp_$channel-$version.zip")
-
-    DownloadUtil.download(url, to)
+        ZipInputStream(URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip").openStream())
 }
 
 private fun List<String>.asNamesMapping(): Map<String, String> {
@@ -86,44 +74,53 @@ fun mcpMappingsStream(version: String): InputStream {
     val mcVersion = ForgeXMLParser.parseVersions(url)[version]
         ?: error("Could not find version $version in $url")
 
-    val snapshot = mcVersion.snapshot
-
     val cachePath = Path("${System.getProperty("user.home")}/.weave/.cache/mappings/mcp_$version")
-    val namesCache = cachePath.resolve("names.zip")
-    val mappingsCache = cachePath.resolve("mappings.zip")
-    val mergedMappingsCached = cachePath.resolve("merged.tiny")
+    val mergedMappingsCache = cachePath.resolve("merged.tiny")
 
-    if (!mergedMappingsCached.exists()) {
-        mcVersion.apply {
-            if (!namesCache.exists()) downloadNames(namesCache)
-            if (!mappingsCache.exists()) downloadMappings(mappingsCache)
-        }
+    if (!mergedMappingsCache.exists()) {
+        mergedMappingsCache.parent.toFile().mkdirs()
 
-        val mappingsContent = readFullZip(ZipFile(mappingsCache.toFile()))
-        val namesContent = readFullZip(ZipFile(namesCache.toFile()))
-        val joinedContent = mappingsContent.getValue(joinedMappings)
+        val srgMappingsContent = readZipStream(mcVersion.srgMappingsStream(versionInt >= 13))
+        val mcpMappingsContent = readZipStream(mcVersion.mcpMappingsStream())
 
-        val originalMappings = MappingsLoader.loadMappings(joinedContent.decodeToString().nonBlankLines())
+        val joinedMappings = srgMappingsContent[joinedMappings]
+            ?: error("Failed to find $joinedMappings in SRG mappings zip")
+
+        val originalMappings = MappingsLoader.loadMappings(joinedMappings.decodeToString().nonBlankLines())
         val finalMappings = originalMappings.mergeSRGWithMCP(
-            methods = namesContent.getValue("methods.csv").decodeToString().nonBlankLines(),
-            fields = namesContent.getValue("fields.csv").decodeToString().nonBlankLines(),
+            methods = mcpMappingsContent["methods.csv"]?.decodeToString()?.nonBlankLines()
+                ?: error("Failed to find methods.csv in MCP mappings zip"),
+            fields = mcpMappingsContent["fields.csv"]?.decodeToString()?.nonBlankLines()
+                ?: error("Failed to find fields.csv in MCP mappings zip"),
         )
 
-        mergedMappingsCached.writeLines(finalMappings.asTinyMappings(v2 = true).write())
+        mergedMappingsCache.writeLines(finalMappings.asTinyMappings(v2 = true).write())
     }
 
-    return mergedMappingsCached.inputStream()
+    return mergedMappingsCache.inputStream()
 }
 
 fun String.nonBlankLines() = this.lines().filter { it.isNotBlank() }
 
-fun readFullZip(zipFile: ZipFile): Map<String, ByteArray> =
-    zipFile.use { o ->
-        zipFile.entries().asSequence().associate {
-            it.name to o.getInputStream(it).readBytes()
+fun readZipStream(zip: ZipInputStream): Map<String, ByteArray> {
+    val entries = mutableMapOf<String, ByteArray>()
+    var entry = zip.nextEntry
+
+    val buffer = ByteArray(1024)
+    while (entry != null) {
+        val baos = ByteArrayOutputStream()
+
+        var bytesRead: Int
+        while (zip.read(buffer).also { bytesRead = it } != -1) {
+            baos.write(buffer, 0, bytesRead)
         }
+
+        entries[entry.name] = baos.toByteArray()
+        entry = zip.nextEntry
     }
 
+    return entries
+}
 
 object ForgeXMLParser {
     private val versionRegex = Regex("<version>(.*?)</version>")
@@ -142,74 +139,5 @@ object ForgeXMLParser {
         return versions.groupBy { it.version }
             .mapValues { it.value.maxByOrNull { version -> version.snapshot }!! }.values.toList()
             .associateBy { version -> version.version }
-    }
-}
-
-object DownloadUtil {
-    /**
-     * Returns the SHA1 checksum of the file as a [String]
-     *
-     * @param file The file to check.
-     * @return the SHA1 checksum of the file.
-     */
-    private fun checksum(file: Path) = try {
-        if (!file.exists()) null
-        else {
-            val digest = MessageDigest.getInstance("SHA-1")
-            file.inputStream().use { input ->
-                val buffer = ByteArray(0x2000)
-                var read: Int
-
-                while (input.read(buffer).also { read = it } >= 0) {
-                    digest.update(buffer, 0, read)
-                }
-            }
-
-            digest.digest().joinToString { "%02x".format(it) }
-        }
-    } catch (ex: IOException) {
-        ex.printStackTrace()
-        null
-    } catch (ignored: NoSuchAlgorithmException) {
-        null
-    }
-
-    /**
-     * Downloads a file from any URL
-     *
-     * @param url The URL to download from.
-     * @param path The path to download to.
-     */
-    fun download(url: URL, path: Path) {
-        println(url)
-        runCatching {
-            url.openStream().use { input ->
-                Files.createDirectories(path.parent)
-                Files.copy(input, path, StandardCopyOption.REPLACE_EXISTING)
-            }
-        }.onFailure { it.printStackTrace() }
-    }
-
-    fun download(url: String, path: String) = download(URL(url), Paths.get(path))
-
-    /**
-     * Fetches data from any URL
-     *
-     * @param url The URL to download from
-     */
-    private fun fetch(url: URL) = runCatching { url.openStream().readBytes().decodeToString() }
-        .onFailure { it.printStackTrace() }.getOrNull()
-
-    fun fetch(url: String) = fetch(URL(url))
-
-    /**
-     * Downloads and checksums a file.
-     *
-     * @param url The URL to download from.
-     * @param checksum The checksum to compare to.
-     * @param path The path to download to.
-     */
-    fun checksumAndDownload(url: URL, checksum: String, path: Path) {
-        if (checksum(path) != checksum) download(url, path)
     }
 }
