@@ -128,25 +128,7 @@ public class MappingsRemapper(
         owner: String,
         name: String,
         applicator: (owner: String) -> String?
-    ): String {
-        val queue = ArrayDeque<String>()
-        val seen = hashSetOf<String>()
-        queue.addLast(owner)
-
-        while (queue.isNotEmpty()) {
-            val curr = queue.removeLast()
-            val new = applicator(curr)
-            if (new != null) return new
-
-            val bytes = loader(curr) ?: continue
-            val reader = ClassReader(bytes)
-
-            reader.superName?.let { if (seen.add(it)) queue.addLast(it) }
-            queue += reader.interfaces.filter { seen.add(it) }
-        }
-
-        return name
-    }
+    ) = walkInheritance(loader, owner) { applicator(it) != null }?.let(applicator) ?: name
 
     /**
      * Returns a [MappingsRemapper] that reverses the changes of this [MappingsRemapper].

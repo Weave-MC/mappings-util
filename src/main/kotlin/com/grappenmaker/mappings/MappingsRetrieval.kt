@@ -87,6 +87,7 @@ fun mcpMappingsStream(version: String, gameJar: File): InputStream? {
         val originalMappings = JarFile(gameJar).use { jar ->
             MappingsLoader.loadMappings(joinedMappings.decodeToString().nonBlankLines())
                 .fixSRGNamespaces()
+                .removeRedundancy(jar)
                 .recoverFieldDescs(jar)
         }
 
@@ -123,7 +124,7 @@ fun parseMCPVersions(url: String): Map<String, MCPVersion> {
     }
 }
 
-fun yarnMappingsStream(version: String): InputStream? {
+fun yarnMappingsStream(version: String, gameJar: File): InputStream? {
     return mappingsCache("yarn", version).getOrPut {
         val versions = URL("$yarnMavenRoot/maven-metadata.xml").readText().parseXMLVersions()
         val targetVersion = versions
@@ -136,8 +137,12 @@ fun yarnMappingsStream(version: String): InputStream? {
         val pathInJar = "mappings/mappings.tiny"
         val entries = ZipInputStream(URL(url).openStream()).readEntries()
 
-        MappingsLoader.loadMappings(entries.getValue(pathInJar).decodeToString().lines()).asTinyMappings(v2 = true)
-            .write()
+        JarFile(gameJar).use { jar ->
+            MappingsLoader.loadMappings(entries.getValue(pathInJar).decodeToString().lines())
+                .removeRedundancy(jar)
+                .asTinyMappings(v2 = true)
+                .write()
+        }
     }
 }
 
@@ -166,6 +171,41 @@ fun Mappings.recoverFieldDescs(file: JarFile) = recoverFieldDescs a@{
     file.getInputStream(file.getJarEntry("$it.class") ?: return@a null).readBytes()
 }
 
+fun MappedMethod.isData() = desc == "(Ljava/lang/Object;)Z" && names.first() == "equals" ||
+        desc == "()I" && names.first() == "hashCode" ||
+        desc == "()Ljava/lang/String;" && names.first() == "toString" ||
+        names.first() == "<init>" || names.first() == "<clinit>"
+
+fun Mappings.removeRedundancy(bytesProvider: (name: String) -> ByteArray?): Mappings = GenericMappings(
+    namespaces,
+    classes.map { oc ->
+        val name = oc.names.first()
+        val ourSigs = hashSetOf<String>()
+        val superSigs = hashSetOf<String>()
+
+        walkInheritance(bytesProvider, name) { curr ->
+            val target = if (curr == name) ourSigs else superSigs
+            bytesProvider(curr)?.let { b -> ClassNode().also { ClassReader(b).accept(it, 0) } }
+                ?.methods?.forEach { m -> target += "${m.name}${m.desc}" }
+
+            false
+        }
+
+        oc.copy(methods = oc.methods.filter {
+            val sig = "${it.names.first()}${it.desc}"
+            sig in ourSigs && sig !in superSigs && !it.isData()
+        })
+    }
+)
+
+fun Mappings.removeRedundancy(file: JarFile): Mappings {
+    val cache = hashMapOf<String, ByteArray?>()
+
+    return removeRedundancy a@{
+        cache.getOrPut(it) { file.getInputStream(file.getJarEntry("$it.class") ?: return@a null).readBytes() }
+    }
+}
+
 inline fun Path.getOrPut(block: () -> Iterable<CharSequence>): InputStream {
     createParentDirectories()
 
@@ -178,7 +218,7 @@ inline fun Path.getOrPut(block: () -> Iterable<CharSequence>): InputStream {
 internal val json = Json { ignoreUnknownKeys = true }
 internal inline fun <reified T : Any> String.decodeJSON() = json.decodeFromString<T>(this)
 
-private fun mojangMappingsStream(version: String): InputStream? {
+private fun mojangMappingsStream(version: String, gameJar: File): InputStream? {
     return mappingsCache("mojmap", version).getOrPut {
         val manifest = URL("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")
             .readText().decodeJSON<VersionManifest>()
@@ -188,9 +228,13 @@ private fun mojangMappingsStream(version: String): InputStream? {
         val mappings = versionInfo.downloads.mappings ?: return null
         require(mappings.size != -1) { "Invalid mappings entry for version $version: $mappings" }
 
-        MappingsLoader.loadMappings(URL(mappings.url).readText().lines())
-            .reorderNamespaces("official", "named")
-            .asTinyMappings(v2 = true).write()
+        JarFile(gameJar).use { jar ->
+            MappingsLoader.loadMappings(URL(mappings.url).readText().lines())
+                .filterClasses { it.names.first().substringAfterLast('/') != "package-info" }
+                .reorderNamespaces("official", "named")
+                .removeRedundancy(jar)
+                .asTinyMappings(v2 = true).write()
+        }
     }
 }
 
@@ -235,11 +279,11 @@ private fun mergedMappingsStream(version: String, gameJar: File): InputStream =
 data class WeaveMappings(val id: String, val mappings: Mappings)
 
 fun loadWeaveMappings(id: String, version: String, gameJar: File) = when (id) {
-    "yarn" -> yarnMappingsStream(version)
+    "yarn" -> yarnMappingsStream(version, gameJar)
     "mcp" -> mcpMappingsStream(version, gameJar)
-    "mojmap" -> mojangMappingsStream(version)
+    "mojmap" -> mojangMappingsStream(version, gameJar)
     "merged" -> mergedMappingsStream(version, gameJar)
     else -> error("Unknown weave mappings id $version")
 }?.let { WeaveMappings(id, MappingsLoader.loadMappings(it.readBytes().decodeToString().lines())) }
 
-fun loadMergedWeaveMappings(version: String, gameJar: File) = loadWeaveMappings("merged", version, gameJar)
+fun loadMergedWeaveMappings(version: String, gameJar: File) = loadWeaveMappings("merged", version, gameJar)!!
