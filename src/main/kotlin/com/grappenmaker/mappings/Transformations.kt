@@ -88,42 +88,29 @@ public fun Mappings.reorderNamespaces(order: List<String>): Mappings {
 
 /**
  * Joins together this [Mappings] with [otherMappings], by matching on [intermediateNamespace].
- * Creates mappings with namespaces [namespace], [intermediateNamespace], [otherNamespace], in that order.
- * At the end, it will also add on all the other namespaces, when [keepOtherNamespaces] is true.
- * The order in which it does this, is add the namespaces of this [Mappings] first, then [otherMappings].
- *
  * If [requireMatch] is true, this method will throw an exception when no method or field or class is found
  */
 public fun Mappings.join(
-    namespace: String,
     otherMappings: Mappings,
-    otherNamespace: String,
     intermediateNamespace: String,
-    keepOtherNamespaces: Boolean = false,
     requireMatch: Boolean = false,
 ): Mappings {
-    val firstId = namespace(namespace)
     val firstIntermediaryId = namespace(intermediateNamespace)
     val secondIntermediaryId = otherMappings.namespace(intermediateNamespace)
-    val secondId = otherMappings.namespace(otherNamespace)
     val bySecondName = otherMappings.classes.associateBy { it.names[secondIntermediaryId] }
 
-    val otherNamespaces = if (keepOtherNamespaces) {
-        val illegal = setOf(namespace, otherNamespace, intermediateNamespace)
-        (namespaces + otherMappings.namespaces).filterNot { it in illegal }.distinct()
-    } else emptyList()
-
-    val firstExtraNames = otherNamespaces.mapNotNull { n -> namespaces.indexOf(n).takeIf { it != -1 } }
-    val secondExtraNames = otherNamespaces.mapNotNull { n -> otherMappings.namespaces.indexOf(n).takeIf { it != -1 } }
-    val orderedExtraNames = (firstExtraNames.map { namespaces[it] } +
-            secondExtraNames.map { otherMappings.namespaces[it] }).distinct()
+    val otherNamespaces = (namespaces + otherMappings.namespaces).filterNot { it == intermediateNamespace }.distinct()
+    val firstNs = otherNamespaces.mapNotNull { n -> namespaces.indexOf(n).takeIf { it != -1 } }
+    val secondNs = otherNamespaces.mapNotNull { n -> otherMappings.namespaces.indexOf(n).takeIf { it != -1 } }
+    val orderedNs = firstNs.map { namespaces[it] } +
+            intermediateNamespace +
+            secondNs.map { otherMappings.namespaces[it] }
 
     fun <T : Mapped> T.updateNames(intermediateName: String, matching: T) =
-        listOf(names[firstId], intermediateName, matching.names[secondId]) +
-                firstExtraNames.map(names::get) + secondExtraNames.map(matching.names::get)
+        firstNs.map(names::get) + intermediateName + secondNs.map(matching.names::get)
 
     // Hack to not have to initialize <init> list every time we implement a missing <init> method mapping
-    val initNames = List(3 + firstExtraNames.size + secondExtraNames.size) { "<init>" }
+    val initNames = List(orderedNs.size) { "<init>" }
 
     val firstBaseRemapper = MappingsRemapper(
         mappings = this,
@@ -142,12 +129,12 @@ public fun Mappings.join(
     val finalizeRemapper = MappingsRemapper(
         mappings = this,
         from = namespaces.first(),
-        to = namespace,
+        to = orderedNs.first(),
         shouldRemapDesc = false
     ) { null }
 
     return GenericMappings(
-        namespaces = listOf(namespace, intermediateNamespace, otherNamespace) + orderedExtraNames,
+        namespaces = orderedNs,
         classes = classes.mapNotNull { originalClass ->
             val intermediateName = originalClass.names[firstIntermediaryId]
             val matching = bySecondName[intermediateName]
@@ -168,7 +155,7 @@ public fun Mappings.join(
                     val matchingField = fieldsByName[intermediateFieldName]
                         ?: if (requireMatch) error("No matching field found for ${it.names}!") else return@inside null
 
-                    it.copy(
+                    MappedField(
                         names = it.updateNames(intermediateFieldName, matchingField),
                         comments = it.comments + matchingField.comments,
                         desc = it.desc?.let(finalizeRemapper::mapDesc)
@@ -180,10 +167,12 @@ public fun Mappings.join(
                         ?: (if (intermediateMethodName == "<init>") return@inside it.copy(names = initNames) else null)
                         ?: if (requireMatch) error("No matching method found for ${it.names}!") else return@inside null
 
-                    it.copy(
+                    MappedMethod(
                         names = it.updateNames(intermediateMethodName, matchingMethod),
                         comments = it.comments + matchingMethod.comments,
-                        desc = finalizeRemapper.mapMethodDesc(it.desc)
+                        desc = finalizeRemapper.mapMethodDesc(it.desc),
+                        parameters = emptyList(),
+                        variables = emptyList(),
                     )
                 }
             )
@@ -192,7 +181,7 @@ public fun Mappings.join(
 }
 
 /**
- * Joins together a list of [Mappings], but takes the first namespace as the target namespace for every [Mappings].
+ * Joins together a list of [Mappings].
  * Note: all namespaces are kept, in order to be able to reduce the mappings nicely without a lot of overhead.
  * If you want to exclude certain namespaces, use [Mappings.filterNamespaces]
  *
@@ -201,16 +190,7 @@ public fun Mappings.join(
 public fun List<Mappings>.join(
     intermediateNamespace: String,
     requireMatch: Boolean = false
-): Mappings = reduce { acc, curr ->
-    acc.join(
-        namespace = acc.namespaces.first(),
-        otherMappings = curr,
-        otherNamespace = curr.namespaces.first(),
-        intermediateNamespace = intermediateNamespace,
-        keepOtherNamespaces = true,
-        requireMatch
-    )
-}
+): Mappings = reduce { acc, curr -> acc.join(curr, intermediateNamespace, requireMatch) }
 
 /**
  * Filters these [Mappings] to only contain namespaces that are in [allowed]
@@ -220,8 +200,11 @@ public fun Mappings.filterNamespaces(vararg allowed: String): Mappings = filterN
 /**
  * Filters these [Mappings] to only contain namespaces that are in [allowed]
  */
-public fun Mappings.filterNamespaces(allowed: Set<String>): Mappings {
-    val indices = namespaces.indices.filter { namespaces[it] in allowed }
+public fun Mappings.filterNamespaces(allowed: Set<String>, allowDuplicates: Boolean = false): Mappings {
+    val indices = mutableListOf<Int>()
+    val seen = hashSetOf<String>()
+    namespaces.intersect(allowed).forEachIndexed { idx, n -> if (allowDuplicates || seen.add(n)) indices += idx }
+
     fun <T : Mapped> T.update() = indices.map(names::get)
 
     return GenericMappings(
@@ -235,3 +218,5 @@ public fun Mappings.filterNamespaces(allowed: Set<String>): Mappings {
         }
     )
 }
+
+public fun Mappings.deduplicateNamespaces() = filterNamespaces(namespaces.toSet())

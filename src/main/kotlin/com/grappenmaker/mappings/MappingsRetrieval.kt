@@ -1,47 +1,53 @@
+@file:OptIn(ExperimentalTypeInference::class)
+
 package com.grappenmaker.mappings
 
-import java.io.ByteArrayOutputStream
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.tree.ClassNode
+import java.io.File
 import java.io.InputStream
 import java.net.URL
+import java.net.URLEncoder
+import java.nio.file.Path
+import java.util.jar.JarFile
 import java.util.zip.ZipInputStream
-import kotlin.io.path.Path
-import kotlin.io.path.exists
-import kotlin.io.path.inputStream
-import kotlin.io.path.writeLines
-
-fun main() {
-    mcpMappingsStream("1.8.9")
-}
+import kotlin.experimental.ExperimentalTypeInference
+import kotlin.io.path.*
 
 private const val forgeMavenRoot = "https://maven.minecraftforge.net/de/oceanlabs/mcp"
+private const val yarnMavenRoot = "https://maven.fabricmc.net/net/fabricmc/yarn"
 
 data class MCPVersion(
     val version: String,
-    val snapshot: String,
+    val snapshot: String?,
+    val fullVersion: String,
     val channel: String
 )
 
 fun MCPVersion.mcpMappingsStream(): ZipInputStream = ZipInputStream(
-    URL("$forgeMavenRoot/mcp_snapshot/$snapshot-$version/mcp_snapshot-$snapshot-$version.zip").openStream()
+    URL("$forgeMavenRoot/mcp_$channel/$fullVersion/mcp_$channel-$fullVersion.zip").openStream()
 )
-fun MCPVersion.srgMappingsStream(useNew: Boolean): ZipInputStream {
-    return if (useNew)
-        ZipInputStream(URL("$forgeMavenRoot/mcp_$channel/$version/mcp_$channel-$version.zip").openStream())
-    else
-        ZipInputStream(URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip").openStream())
-}
+
+fun MCPVersion.srgMappingsStream(useNew: Boolean): ZipInputStream =
+    if (useNew) ZipInputStream(URL("$forgeMavenRoot/mcp_config/$version/mcp_config-$version.zip").openStream())
+    else ZipInputStream(URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip").openStream())
 
 private fun List<String>.asNamesMapping(): Map<String, String> {
-    val meaning = first()
-    val meaningIndices = meaning.split(',')
-
-    val fromIdx = meaningIndices.indexOf("searge")
-    val toIdx = meaningIndices.indexOf("name")
+    val meaning = first().split(',')
+    val fromIdx = meaning.indexOf("searge")
+    val toIdx = meaning.indexOf("name")
 
     return drop(1).map { it.split(',') }.associate { it[fromIdx] to it[toIdx] }
 }
 
+fun Mappings.fixSRGNamespaces(): Mappings = if (namespaces.size == 2) renameNamespaces("obf", "srg") else this
+
 fun Mappings.mergeSRGWithMCP(methods: List<String>, fields: List<String>): GenericMappings {
+    require("named" !in namespaces)
+
     val methodsMapping = methods.asNamesMapping()
     val fieldsMapping = fields.asNamesMapping()
 
@@ -49,6 +55,7 @@ fun Mappings.mergeSRGWithMCP(methods: List<String>, fields: List<String>): Gener
         namespaces = namespaces + "named",
         classes = classes.map { oc ->
             oc.copy(
+                names = oc.names + oc.names.last(),
                 methods = oc.methods.map {
                     val last = it.names.last()
                     it.copy(names = it.names + (methodsMapping[last] ?: last))
@@ -62,31 +69,27 @@ fun Mappings.mergeSRGWithMCP(methods: List<String>, fields: List<String>): Gener
     )
 }
 
-fun mcpMappingsStream(version: String): InputStream {
-    val versionInt = version.substringAfter("1.").toDouble()
-    val joinedMappings = if (versionInt >= 13) "config/joined.tsrg" else "joined.srg"
-    val mappingsChannel = if (versionInt >= 15.1) "config" else "snapshot"
+fun mcpMappingsStream(version: String, gameJar: File): InputStream? {
+    val versionDecimal = version.substringAfter("1.").toDouble()
+    val joinedMappingsPath = if (versionDecimal >= 13) "config/joined.tsrg" else "joined.srg"
+    val mappingsChannel = if (versionDecimal >= 15.1) "config" else "snapshot"
+    if (versionDecimal >= 16) return null
 
-    if (versionInt >= 16)
-        error("Versions 1.16+ do not have MCP mappings associated")
+    return mappingsCache("mcp", version).getOrPut {
+        val url = "$forgeMavenRoot/mcp_$mappingsChannel/maven-metadata.xml"
+        val mcVersion = parseMCPVersions(url)[version] ?: error("Could not find version $version in $url")
+        val srgMappingsContent = mcVersion.srgMappingsStream(versionDecimal >= 13).readEntries()
+        val mcpMappingsContent = mcVersion.mcpMappingsStream().readEntries()
 
-    val url = "$forgeMavenRoot/mcp_$mappingsChannel/maven-metadata.xml"
-    val mcVersion = ForgeXMLParser.parseVersions(url)[version]
-        ?: error("Could not find version $version in $url")
+        val joinedMappings = srgMappingsContent[joinedMappingsPath]
+            ?: error("Failed to find $joinedMappingsPath in SRG mappings zip")
 
-    val cachePath = Path("${System.getProperty("user.home")}/.weave/.cache/mappings/mcp_$version")
-    val mergedMappingsCache = cachePath.resolve("merged.tiny")
+        val originalMappings = JarFile(gameJar).use { jar ->
+            MappingsLoader.loadMappings(joinedMappings.decodeToString().nonBlankLines())
+                .fixSRGNamespaces()
+                .recoverFieldDescs(jar)
+        }
 
-    if (!mergedMappingsCache.exists()) {
-        mergedMappingsCache.parent.toFile().mkdirs()
-
-        val srgMappingsContent = readZipStream(mcVersion.srgMappingsStream(versionInt >= 13))
-        val mcpMappingsContent = readZipStream(mcVersion.mcpMappingsStream())
-
-        val joinedMappings = srgMappingsContent[joinedMappings]
-            ?: error("Failed to find $joinedMappings in SRG mappings zip")
-
-        val originalMappings = MappingsLoader.loadMappings(joinedMappings.decodeToString().nonBlankLines())
         val finalMappings = originalMappings.mergeSRGWithMCP(
             methods = mcpMappingsContent["methods.csv"]?.decodeToString()?.nonBlankLines()
                 ?: error("Failed to find methods.csv in MCP mappings zip"),
@@ -94,50 +97,149 @@ fun mcpMappingsStream(version: String): InputStream {
                 ?: error("Failed to find fields.csv in MCP mappings zip"),
         )
 
-        mergedMappingsCache.writeLines(finalMappings.asTinyMappings(v2 = true).write())
+        finalMappings.renameNamespaces("official", "srg", "named").asTinyMappings(v2 = true).write()
     }
-
-    return mergedMappingsCache.inputStream()
 }
 
-fun String.nonBlankLines() = this.lines().filter { it.isNotBlank() }
+fun String.nonBlankLines() = lines().filter { it.isNotBlank() }
+fun ZipInputStream.readEntries() = generateSequence { nextEntry }.associate { it.name to readBytes() }
 
-fun readZipStream(zip: ZipInputStream): Map<String, ByteArray> {
-    val entries = mutableMapOf<String, ByteArray>()
-    var entry = zip.nextEntry
+private val versionRegex = """<version>(.*?)</version>""".toRegex()
+fun String.parseXMLVersions() = versionRegex.findAll(this).map { it.groupValues[1] }.toList()
 
-    val buffer = ByteArray(1024)
-    while (entry != null) {
-        val baos = ByteArrayOutputStream()
-
-        var bytesRead: Int
-        while (zip.read(buffer).also { bytesRead = it } != -1) {
-            baos.write(buffer, 0, bytesRead)
+fun parseMCPVersions(url: String): Map<String, MCPVersion> {
+    val text = URL(url).readText()
+    val versionsString = text.parseXMLVersions()
+    val versions: List<MCPVersion> = versionsString.map { l ->
+        val (before, after) = l.splitAround('-')
+        when {
+            "snapshot" in url -> MCPVersion(after, before, l, "snapshot")
+            else -> MCPVersion(before, after.substringBefore('.').takeIf { it.isNotEmpty() }, l, "config")
         }
-
-        entries[entry.name] = baos.toByteArray()
-        entry = zip.nextEntry
     }
 
-    return entries
-}
-
-object ForgeXMLParser {
-    private val versionRegex = Regex("<version>(.*?)</version>")
-
-    fun parseVersions(url: String): Map<String, MCPVersion> {
-        val text = URL(url).readText()
-        val versionsString = versionRegex.findAll(text).map { it.groupValues[1] }.toList()
-        val versions: List<MCPVersion> = versionsString.map {
-            val (before, after) = it.splitAround('-')
-            if (url.contains("snapshot"))
-                MCPVersion(after, before, "snapshot")
-            else
-                MCPVersion(before, after.substringBefore('.'), "config")
-        }
-
-        return versions.groupBy { it.version }
-            .mapValues { it.value.maxByOrNull { version -> version.snapshot }!! }.values.toList()
-            .associateBy { version -> version.version }
+    return versions.groupBy { it.version }.mapValues { (_, v) ->
+        v.find { it.snapshot == null } ?: v.maxBy { it.snapshot!! }
     }
 }
+
+fun yarnMappingsStream(version: String): InputStream? {
+    return mappingsCache("yarn", version).getOrPut {
+        val versions = URL("$yarnMavenRoot/maven-metadata.xml").readText().parseXMLVersions()
+        val targetVersion = versions
+            .filter { it.substringBefore('+') == version }
+            .maxByOrNull { it.substringAfterLast('.').toInt() }
+            ?: return null
+
+        val versionEncoded = URLEncoder.encode(targetVersion, "UTF-8")
+        val url = "$yarnMavenRoot/$versionEncoded/yarn-$versionEncoded.jar"
+        val pathInJar = "mappings/mappings.tiny"
+        val entries = ZipInputStream(URL(url).openStream()).readEntries()
+
+        MappingsLoader.loadMappings(entries.getValue(pathInJar).decodeToString().lines()).asTinyMappings(v2 = true)
+            .write()
+    }
+}
+
+fun mappingsCache(id: String, version: String) =
+    Path(System.getProperty("user.home"), ".weave", ".cache", "mappings", "${id}_$version", "mappings.tiny")
+
+@OverloadResolutionByLambdaReturnType
+fun Mappings.recoverFieldDescs(bytesProvider: (name: String) -> ByteArray?): Mappings =
+    recoverFieldDescs { name -> bytesProvider(name)?.let { b -> ClassNode().also { ClassReader(b).accept(it, 0) } } }
+
+@JvmName("recoverDescsByNode")
+@OverloadResolutionByLambdaReturnType
+fun Mappings.recoverFieldDescs(nodeProvider: (name: String) -> ClassNode?): Mappings = GenericMappings(
+    namespaces,
+    classes.map { oc ->
+        val node by lazy { nodeProvider(oc.names.first()) }
+        val fieldsByName by lazy { node?.fields?.associateBy { it.name } ?: emptyMap() }
+
+        oc.copy(fields = oc.fields.mapNotNull { of ->
+            of.copy(desc = of.desc ?: (fieldsByName[of.names.first()]?.desc ?: return@mapNotNull null))
+        })
+    }
+)
+
+fun Mappings.recoverFieldDescs(file: JarFile) = recoverFieldDescs a@{
+    file.getInputStream(file.getJarEntry("$it.class") ?: return@a null).readBytes()
+}
+
+inline fun Path.getOrPut(block: () -> Iterable<CharSequence>): InputStream {
+    createParentDirectories()
+
+    if (!exists()) writeLines(block())
+    require(exists())
+
+    return inputStream()
+}
+
+internal val json = Json { ignoreUnknownKeys = true }
+internal inline fun <reified T : Any> String.decodeJSON() = json.decodeFromString<T>(this)
+
+private fun mojangMappingsStream(version: String): InputStream? {
+    return mappingsCache("mojmap", version).getOrPut {
+        val manifest = URL("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")
+            .readText().decodeJSON<VersionManifest>()
+
+        val versionEntry = manifest.versions.find { it.id == version } ?: return null
+        val versionInfo = URL(versionEntry.url).readText().decodeJSON<VersionInfo>()
+        val mappings = versionInfo.downloads.mappings ?: return null
+        require(mappings.size != -1) { "Invalid mappings entry for version $version: $mappings" }
+
+        MappingsLoader.loadMappings(URL(mappings.url).readText().lines())
+            .reorderNamespaces("official", "named")
+            .asTinyMappings(v2 = true).write()
+    }
+}
+
+@Serializable
+private data class VersionManifest(val versions: List<ManifestVersion>)
+
+@Serializable
+private data class ManifestVersion(val id: String, val url: String)
+
+@Serializable
+private data class VersionInfo(val downloads: VersionDownloads)
+
+@Serializable
+private data class VersionDownloads(
+    val client: VersionDownload,
+    @SerialName("client_mappings") val mappings: ClientMappings? = null
+)
+
+@Serializable
+private data class ClientMappings(
+    val url: String,
+    val sha1: String,
+    val size: Int = -1
+)
+
+@Serializable
+private data class VersionDownload(val url: String, val sha1: String)
+
+private fun allMappings(version: String, gameJar: File) =
+    listOf("mcp", "yarn", "mojmap").mapNotNull { loadWeaveMappings(it, version, gameJar) }
+
+private fun mergedMappingsStream(version: String, gameJar: File): InputStream =
+    mappingsCache("merged", version).getOrPut {
+        val joined = allMappings(version, gameJar).map { (id, mappings) ->
+            mappings.renameNamespaces(mappings.namespaces.map { if (it == "official") it else "$id-$it" })
+        }.join("official")
+
+        val otherNs = joined.namespaces - "official"
+        joined.reorderNamespaces(listOf("official") + otherNs).asTinyMappings(v2 = true).write()
+    }
+
+data class WeaveMappings(val id: String, val mappings: Mappings)
+
+fun loadWeaveMappings(id: String, version: String, gameJar: File) = when (id) {
+    "yarn" -> yarnMappingsStream(version)
+    "mcp" -> mcpMappingsStream(version, gameJar)
+    "mojmap" -> mojangMappingsStream(version)
+    "merged" -> mergedMappingsStream(version, gameJar)
+    else -> error("Unknown weave mappings id $version")
+}?.let { WeaveMappings(id, MappingsLoader.loadMappings(it.readBytes().decodeToString().lines())) }
+
+fun loadMergedWeaveMappings(version: String, gameJar: File) = loadWeaveMappings("merged", version, gameJar)

@@ -56,7 +56,7 @@ public data object ProguardMappingsFormat : MappingsFormat<ProguardMappings> {
 
     override fun parse(lines: List<String>): ProguardMappings {
         var state: ProguardState = MappingState()
-        lines.filterNot { it.startsWith('#') }.forEach { state = state.update(it) }
+        lines.filter { !it.startsWith('#') && it.isNotEmpty() }.forEach { state = state.update(it) }
         state = state.end()
 
         return ProguardMappings(

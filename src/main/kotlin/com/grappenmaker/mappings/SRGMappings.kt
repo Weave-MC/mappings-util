@@ -48,7 +48,7 @@ internal class BasicSRGParser(private val isExtended: Boolean) : MappingsFormat<
             MappedField(
                 names = listOf(from.substringAfterLast('/'), to.substringAfterLast('/')),
                 comments = listOf(),
-                desc = if (isExtended) parts[1] else "null" //TODO probably shouldn't set desc to "null" if it's missing
+                desc = if (isExtended) parts[1] else null
             )
         }
 

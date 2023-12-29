@@ -122,7 +122,7 @@ public object MappingsLoader {
     public val allMappingsFormats: List<MappingsFormat<*>> = listOf(
         TinyMappingsV1Format, TinyMappingsV2Format,
         SRGMappingsFormat, XSRGMappingsFormat,
-        ProguardMappingsFormat
+        ProguardMappingsFormat, TSRGV1MappingsFormat, TSRGV2MappingsFormat
     )
 
     /**

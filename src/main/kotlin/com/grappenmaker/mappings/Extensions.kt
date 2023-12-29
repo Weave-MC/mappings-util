@@ -49,4 +49,5 @@ public fun Mappings.asASMMapping(
         if (includeMethods) clz.methods.forEach { put(it.index(owner, fromIndex), it.names[toIndex]) }
     }
 }
-internal fun String.splitAround(c: Char): Pair<String,String> = substringBefore(c) to substringAfter(c)
+
+internal fun String.splitAround(c: Char): Pair<String,String> = substringBefore(c) to substringAfter(c, "")

@@ -8,7 +8,13 @@ public data class TinyMappings(
     override val namespaces: List<String>,
     override val classes: List<MappedClass>,
     val isV2: Boolean
-) : Mappings
+) : Mappings {
+    init {
+        for (c in classes) for (f in c.fields) require(f.desc != null) {
+            "field descriptors are not allowed to be null in Tiny mappings!"
+        }
+    }
+}
 
 /**
  * Represents the Tiny v1 mappings format
@@ -28,7 +34,7 @@ public fun TinyMappings.write(): List<String> = (if (isV2) TinyMappingsV2Format 
 internal class TinyMappingsFormat(private val isV2: Boolean) : MappingsFormat<TinyMappings> {
     override fun detect(lines: List<String>): Boolean =
         lines.firstOrNull()?.parts()?.first() == (if (isV2) "tiny" else "v1") && (isV2 || lines.drop(1).all {
-            it.startsWith("CLASS") || it.startsWith("FIELD") || it.startsWith("METHOD")
+            it.startsWith("CLASS") || it.startsWith("FIELD") || it.startsWith("METHOD") || it.isEmpty()
         })
 
     // Quirk: empty name means take the last name
@@ -232,7 +238,7 @@ internal class TinyMappingsFormat(private val isV2: Boolean) : MappingsFormat<Ti
 
             val fieldsPart = mappings.classes.flatMap { c ->
                 c.fields.map {
-                    "FIELD\t${c.names.first()}\t${it.desc}\t${it.names.join()}"
+                    "FIELD\t${c.names.first()}\t${it.desc!!}\t${it.names.join()}"
                 }
             }
 
