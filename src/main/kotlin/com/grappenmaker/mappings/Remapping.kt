@@ -169,6 +169,7 @@ public open class ModJarRemapper(
     remapper: Remapper
 ): ClassRemapper(Opcodes.ASM9, parent, remapper) {
     private var annotationNode: SimpleAnnotationNode? = null
+    lateinit var targetClass: String
     override fun createAnnotationRemapper(
         descriptor: String?,
         parent: AnnotationVisitor?
@@ -176,19 +177,26 @@ public open class ModJarRemapper(
         if (descriptor != "Lnet/weavemc/api/mixin/Mixin;")
             return super.createAnnotationRemapper(descriptor, parent)
 
-        val node = SimpleAnnotationNode(parent, descriptor)
-        annotationNode = node
+        annotationNode = SimpleAnnotationNode(parent, descriptor)
 
-        return node
+        return object : AnnotationVisitor(Opcodes.ASM9, annotationNode) {
+            override fun visit(name: String?, value: Any?) {
+                val newValue = if (name == "targetClass") {
+                    targetClass = (value as Type).internalName
+                    Type.getObjectType(remapper.map(targetClass))
+                }
+                else
+                    value
+
+                super.visit(name, newValue)
+            }
+        }
     }
     override fun createMethodRemapper(parent: MethodVisitor): MethodVisitor {
         if (annotationNode == null)
             return super.createMethodRemapper(parent)
 
-        val targetClass: String = annotationNode!!.values[0].toString()
-        // substring targetClass to remove 'L' and ';' from the full name
-        val formattedTargetClass = targetClass.substring(1, targetClass.length - 1)
-        return ModMethodRemapper(formattedTargetClass, parent, remapper)
+        return ModMethodRemapper(targetClass, parent, remapper)
     }
 }
 public open class ModMethodRemapper(
@@ -214,6 +222,7 @@ public class MixinAnnotationRemapper(
                 val annotationName = descriptor.substringAfterLast('/')
                 when (name) {
                     "method" -> {
+                        println("remapping method annotation")
                         if (!value.isMethod())
                             error("Failed to identify $value as a method in $annotationName annotation")
 
@@ -225,12 +234,14 @@ public class MixinAnnotationRemapper(
                         mappedName + mappedDesc
                     }
                     "field" -> {
+                        println("remapping field annotation")
                         if (value.isMethod())
                             error("Identified $value as a method when field is expected in $annotationName annotation")
 
                         remapper.mapFieldName(targetMixinClass, value, null)
                     }
                     "target" -> {
+                        println("remapping target annotation")
                         name.parseAndRemapTarget()
                     }
                     else -> value
