@@ -27,11 +27,11 @@ data class MCPVersion(
     val channel: String
 )
 
-fun MCPVersion.mcpMappingsStream(): ZipInputStream = ZipInputStream(
+fun MCPVersion.mcpNamesStream(): ZipInputStream = ZipInputStream(
     URL("$forgeMavenRoot/mcp_$channel/$fullVersion/mcp_$channel-$fullVersion.zip").openStream()
 )
 
-fun MCPVersion.srgMappingsStream(useNew: Boolean): ZipInputStream =
+fun MCPVersion.srgNamesStream(useNew: Boolean): ZipInputStream =
     if (useNew) ZipInputStream(URL("$forgeMavenRoot/mcp_config/$version/mcp_config-$version.zip").openStream())
     else ZipInputStream(URL("$forgeMavenRoot/mcp/$version/mcp-$version-srg.zip").openStream())
 
@@ -78,8 +78,8 @@ fun mcpMappingsStream(version: String, gameJar: File): InputStream? {
     return mappingsCache("mcp", version).getOrPut {
         val url = "$forgeMavenRoot/mcp_$mappingsChannel/maven-metadata.xml"
         val mcVersion = parseMCPVersions(url)[version] ?: error("Could not find version $version in $url")
-        val srgMappingsContent = mcVersion.srgMappingsStream(versionDecimal >= 13).readEntries()
-        val mcpMappingsContent = mcVersion.mcpMappingsStream().readEntries()
+        val srgMappingsContent = mcVersion.srgNamesStream(versionDecimal >= 13).readEntries()
+        val mcpMappingsContent = mcVersion.mcpNamesStream().readEntries()
 
         val joinedMappings = srgMappingsContent[joinedMappingsPath]
             ?: error("Failed to find $joinedMappingsPath in SRG mappings zip")
@@ -283,7 +283,7 @@ fun loadWeaveMappings(id: String, version: String, gameJar: File) = when (id) {
     "mcp" -> mcpMappingsStream(version, gameJar)
     "mojmap" -> mojangMappingsStream(version, gameJar)
     "merged" -> mergedMappingsStream(version, gameJar)
-    else -> error("Unknown weave mappings id $version")
+    else -> error("Unknown weave mappings id $id")
 }?.let { WeaveMappings(id, MappingsLoader.loadMappings(it.readBytes().decodeToString().lines())) }
 
 fun loadMergedWeaveMappings(version: String, gameJar: File) = loadWeaveMappings("merged", version, gameJar)!!
